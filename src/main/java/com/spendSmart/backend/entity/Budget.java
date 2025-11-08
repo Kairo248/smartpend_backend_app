@@ -101,11 +101,15 @@ public class Budget {
     }
 
     public Boolean isOverBudget() {
+        System.out.println("Budget '" + this.name + "' isOverBudget check: spent=" + spentAmount + ", budget=" + amount + ", result=" + (spentAmount.compareTo(amount) > 0));
         return spentAmount.compareTo(amount) > 0;
     }
 
     public Boolean shouldAlert() {
-        return alertEnabled && getSpentPercentage().compareTo(alertThreshold) >= 0;
+        BigDecimal percentage = getSpentPercentage();
+        boolean shouldAlert = alertEnabled && percentage.compareTo(alertThreshold) >= 0;
+        System.out.println("Budget '" + this.name + "' shouldAlert check: alertEnabled=" + alertEnabled + ", percentage=" + percentage + ", threshold=" + alertThreshold + ", result=" + shouldAlert);
+        return shouldAlert;
     }
 
     // Enums

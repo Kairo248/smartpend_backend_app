@@ -19,6 +19,7 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import java.util.stream.Collectors;
 
 
 @Service
@@ -31,6 +32,7 @@ public class BudgetService {
     private final CategoryRepository categoryRepository;
     private final BudgetMapper budgetMapper;
     private final UserRepository userRepository;
+    private final com.spendSmart.backend.repository.ExpenseRepository expenseRepository;
 
     public List<BudgetResponse> getAllBudgets(Long userId) {
         log.info("Getting all budgets for user: {}", userId);
@@ -39,6 +41,15 @@ public class BudgetService {
                 .orElseThrow(() -> new ResourceNotFoundException("User not found with id: " + userId));
         
         List<Budget> budgets = budgetRepository.findByUserAndIsActiveTrue(user);
+        
+        // Update spent amounts for accurate status calculations
+        for (Budget budget : budgets) {
+            BigDecimal actualSpent = calculateActualSpentAmount(budget);
+            log.info("Budget '{}' - Old spent: {}, New calculated spent: {}, Budget amount: {}", 
+                budget.getName(), budget.getSpentAmount(), actualSpent, budget.getAmount());
+            budget.setSpentAmount(actualSpent);
+        }
+        
         return budgets.stream()
                 .map(this::mapToBudgetResponse)
                 .toList();
@@ -57,6 +68,10 @@ public class BudgetService {
         if (!budget.getUser().getId().equals(userId)) {
             throw new ValidationException("Budget does not belong to the current user");
         }
+        
+        // Update spent amount for accurate status
+        BigDecimal actualSpent = calculateActualSpentAmount(budget);
+        budget.setSpentAmount(actualSpent);
         
         return mapToBudgetResponse(budget);
     }
@@ -153,8 +168,21 @@ public class BudgetService {
                 .orElseThrow(() -> new ResourceNotFoundException("User not found with id: " + userId));
         
         List<Budget> activeBudgets = budgetRepository.findActiveBudgetsForUser(user, LocalDateTime.now());
-        List<Budget> overBudgets = budgetRepository.findOverbudgetBudgets(user);
-        List<Budget> alertingBudgets = budgetRepository.findBudgetsNeedingAlert(user);
+        
+        // Update all budgets with fresh spent amounts
+        for (Budget budget : activeBudgets) {
+            BigDecimal actualSpent = calculateActualSpentAmount(budget);
+            budget.setSpentAmount(actualSpent);
+        }
+        
+        // Now calculate summary statistics based on fresh data
+        List<Budget> overBudgets = activeBudgets.stream()
+                .filter(Budget::isOverBudget)
+                .collect(Collectors.toList());
+                
+        List<Budget> alertingBudgets = activeBudgets.stream()
+                .filter(Budget::shouldAlert)
+                .collect(Collectors.toList());
         
         BigDecimal totalBudgeted = activeBudgets.stream()
                 .map(Budget::getAmount)
@@ -193,6 +221,13 @@ public class BudgetService {
                 .orElseThrow(() -> new ResourceNotFoundException("User not found with id: " + userId));
         
         List<Budget> activeBudgets = budgetRepository.findActiveBudgetsForUser(user, LocalDateTime.now());
+        
+        // Update spent amounts for accurate status calculations
+        for (Budget budget : activeBudgets) {
+            BigDecimal actualSpent = calculateActualSpentAmount(budget);
+            budget.setSpentAmount(actualSpent);
+        }
+        
         return activeBudgets.stream()
                 .map(this::mapToBudgetResponse)
                 .toList();
@@ -274,6 +309,13 @@ public class BudgetService {
                 ? (int) ChronoUnit.DAYS.between(now, budget.getEndDate()) 
                 : 0;
         
+        // Note: Spent amount should already be calculated by the calling method
+        
+        // Debug logging
+        log.info("Budget '{}' response - Spent: {}, Amount: {}, IsOver: {}, ShouldAlert: {}", 
+            budget.getName(), budget.getSpentAmount(), budget.getAmount(), 
+            budget.isOverBudget(), budget.shouldAlert());
+            
         return BudgetResponse.builder()
                 .id(budget.getId())
                 .name(budget.getName())
@@ -296,5 +338,71 @@ public class BudgetService {
                 .isExpired(budget.getEndDate().isBefore(now))
                 .daysRemaining(daysRemaining)
                 .build();
+    }
+
+    @Transactional
+    public void updateBudgetSpentAmounts(Long userId) {
+        log.info("Updating budget spent amounts for user: {}", userId);
+        
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResourceNotFoundException("User not found with id: " + userId));
+        
+        List<Budget> activeBudgets = budgetRepository.findByUserAndIsActiveTrue(user);
+        
+        for (Budget budget : activeBudgets) {
+            BigDecimal actualSpent = calculateActualSpentAmount(budget);
+            budget.setSpentAmount(actualSpent);
+            budgetRepository.save(budget);
+        }
+        
+        log.info("Updated spent amounts for {} budgets", activeBudgets.size());
+    }
+
+    private BigDecimal calculateActualSpentAmount(Budget budget) {
+        // Get all expenses for the user in the budget period
+        List<com.spendSmart.backend.entity.Expense> expenses = expenseRepository.findByUserAndTransactionDateBetween(
+            budget.getUser(), 
+            budget.getStartDate().toLocalDate(), 
+            budget.getEndDate().toLocalDate()
+        );
+        
+        log.info("Budget '{}' calculation - Found {} expenses between {} and {}", 
+            budget.getName(), expenses.size(), 
+            budget.getStartDate().toLocalDate(), budget.getEndDate().toLocalDate());
+            
+        // Log all expenses for debugging
+        expenses.forEach(expense -> {
+            log.info("  - Expense: {} ({}), Amount: {}, Date: {}, Type: {}", 
+                expense.getDescription(), 
+                expense.getCategory() != null ? expense.getCategory().getName() : "No Category",
+                expense.getAmount(), 
+                expense.getTransactionDate(),
+                expense.getType());
+        });
+        
+        // Filter by category if this is a category-specific budget
+        if (budget.getCategory() != null) {
+            int beforeFilter = expenses.size();
+            expenses = expenses.stream()
+                    .filter(expense -> expense.getCategory() != null && 
+                            expense.getCategory().getId().equals(budget.getCategory().getId()))
+                    .collect(java.util.stream.Collectors.toList());
+            log.info("Budget '{}' - Filtered by category '{}': {} -> {} expenses", 
+                budget.getName(), budget.getCategory().getName(), beforeFilter, expenses.size());
+        }
+        
+        // Sum up only EXPENSE type transactions (not INCOME)
+        List<com.spendSmart.backend.entity.Expense> expenseTypeOnly = expenses.stream()
+                .filter(expense -> expense.getType() == com.spendSmart.backend.entity.Expense.ExpenseType.EXPENSE)
+                .collect(java.util.stream.Collectors.toList());
+        
+        log.info("Budget '{}' - After filtering EXPENSE type: {} expenses", budget.getName(), expenseTypeOnly.size());
+        
+        BigDecimal totalSpent = expenseTypeOnly.stream()
+                .map(com.spendSmart.backend.entity.Expense::getAmount)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+                
+        log.info("Budget '{}' - Total calculated spent amount: {}", budget.getName(), totalSpent);
+        return totalSpent;
     }
 }

@@ -39,6 +39,9 @@ public class ExpenseService {
     @Autowired
     private CategoryService categoryService;
 
+    @Autowired
+    private BudgetService budgetService;
+
     public List<ExpenseResponse> getUserExpenses(Long userId) {
         List<Expense> expenses = expenseRepository.findByUserIdOrderByTransactionDateDesc(userId);
         return expenses.stream()
@@ -89,6 +92,10 @@ public class ExpenseService {
         // Update wallet balance based on expense type
         updateWalletBalance(wallet, savedExpense, true);
 
+        // Update budget spent amounts
+        System.out.println("Updating budget spent amounts after creating expense for user: " + userId);
+        updateBudgetSpentAmounts(userId);
+
         return mapToExpenseResponse(savedExpense);
     }
 
@@ -130,6 +137,9 @@ public class ExpenseService {
         // Apply new wallet balance change
         updateWalletBalance(newWallet, updatedExpense, true);
 
+        // Update budget spent amounts
+        updateBudgetSpentAmounts(userId);
+
         return mapToExpenseResponse(updatedExpense);
     }
 
@@ -142,6 +152,9 @@ public class ExpenseService {
         updateWalletBalance(expense.getWallet(), expense, false);
 
         expenseRepository.delete(expense);
+
+        // Update budget spent amounts
+        updateBudgetSpentAmounts(userId);
     }
 
     private Category validateCategory(Long categoryId, Long userId) {
@@ -199,5 +212,10 @@ public class ExpenseService {
                 expense.getCreatedAt(),
                 expense.getUpdatedAt()
         );
+    }
+
+    private void updateBudgetSpentAmounts(Long userId) {
+        System.out.println("ExpenseService calling BudgetService.updateBudgetSpentAmounts for user: " + userId);
+        budgetService.updateBudgetSpentAmounts(userId);
     }
 }

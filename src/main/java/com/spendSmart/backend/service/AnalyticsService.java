@@ -416,7 +416,27 @@ public class AnalyticsService {
     }
 
     private List<DashboardSummaryResponse.BudgetAlert> generateBudgetAlerts(User user) {
-        List<Budget> alertingBudgets = budgetRepository.findBudgetsNeedingAlert(user);
+        // Get all active budgets and update their spent amounts with fresh calculations
+        List<Budget> activeBudgets = budgetRepository.findByUserAndIsActiveTrue(user);
+        
+        for (Budget budget : activeBudgets) {
+            BigDecimal actualSpent = calculateActualSpentAmount(budget);
+            System.out.println("Dashboard Alert Generation - Budget '" + budget.getName() + "' spent amount updated: " + 
+                budget.getSpentAmount() + " -> " + actualSpent);
+            budget.setSpentAmount(actualSpent);
+        }
+        
+        // Now filter for budgets that need alerts based on fresh data
+        List<Budget> alertingBudgets = activeBudgets.stream()
+                .filter(budget -> {
+                    boolean needsAlert = budget.shouldAlert() || budget.isOverBudget();
+                    System.out.println("Budget '" + budget.getName() + "' alert check: shouldAlert=" + 
+                        budget.shouldAlert() + ", isOverBudget=" + budget.isOverBudget() + ", needsAlert=" + needsAlert);
+                    return needsAlert;
+                })
+                .collect(Collectors.toList());
+                
+        System.out.println("Total active budgets: " + activeBudgets.size() + ", Alerting budgets: " + alertingBudgets.size());
         
         return alertingBudgets.stream()
                 .map(budget -> DashboardSummaryResponse.BudgetAlert.builder()
